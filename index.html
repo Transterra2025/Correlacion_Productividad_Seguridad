@@ -4,8 +4,12 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Matriz 2×2 — Productividad vs Seguridad (SIGLA)</title>
+
+<!-- Librerías -->
 <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+
 <style>
   :root{
     --bg:#ffffff; --fg:#0f172a; --muted:#475569;
@@ -23,7 +27,7 @@
   h1{margin:0 0 16px;font-size:1.6rem;}
   .layout{display:grid;grid-template-columns:320px 1fr;gap:16px;}
   @media (max-width: 960px){ .layout{grid-template-columns:1fr;} }
-  .card{border:1px solid var(--border);border-radius:14px;padding:16px;background:var(--card);box-shadow:var(--shadow);}
+  .card{border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:16px;background:var(--card);box-shadow:var(--shadow);}
   .card h3{margin:0 0 12px;font-size:1.05rem}
   .muted{color:var(--muted)}
   label{font-weight:600;font-size:.95rem}
@@ -33,7 +37,7 @@
   button.ghost{background:var(--ghost);color:var(--fg)}
   .btnbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   .btnbar.right{justify-content:flex-end}
-  /* KPI cards */
+  /* KPI */
   .summary-bar{display:grid;grid-template-columns:repeat(5,minmax(220px,1fr));gap:10px}
   @media (max-width: 1200px){ .summary-bar{grid-template-columns:repeat(2,1fr);} }
   @media (max-width: 640px){ .summary-bar{grid-template-columns:1fr;} }
@@ -50,7 +54,7 @@
   /* Pesos */
   .weights-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
   .weights-grid .cell{display:flex;flex-direction:column;align-items:center;gap:6px}
-  .weights-grid input{width:110px;text-align:center} 
+  .weights-grid input{width:110px;text-align:center}
   /* Umbrales */
   details{border:1px dashed var(--border);border-radius:10px;padding:10px}
   details summary{cursor:pointer;font-weight:700}
@@ -73,7 +77,7 @@
   .pill.b{background:#fff1e6;color:#9a3412}
   .pill.c{background:#e6f0ff;color:#1e3a8a}
   .pill.d{background:#fde8e8;color:#7f1d1d}
-  /* Header actions on the right */
+  /* Header actions */
   .page-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-bottom:10px}
 </style>
 </head>
@@ -81,6 +85,7 @@
 <h1>📊 Matriz 2×2 — Productividad vs Seguridad</h1>
 
 <div class="page-actions">
+  <button id="gsBtn" class="ghost">Cargar desde Google Sheets</button>
   <button id="runBtn">Generar</button>
   <button id="resetBtn" class="ghost">Reset</button>
   <button id="csvBtn" class="ghost">Exportar CSV</button>
@@ -93,9 +98,8 @@
     <h3>Filtros</h3>
 
     <section style="margin-top:10px">
-      <h4 style="margin:10px 0 6px">Archivo Excel</h4>
-      <input type="file" id="fileInput" accept=".xlsx"/>
-      <div class="muted" style="margin-top:4px">Hojas: <b>Base_Producciones</b> y <b>Base_Precursores</b></div>
+      <h4 style="margin:10px 0 6px">Fuente de datos</h4>
+      <div class="muted">Usando: <b>Google Sheets (GViz / JSONP)</b>. Botón “Cargar desde Google Sheets”.</div>
     </section>
 
     <section style="margin-top:16px">
@@ -198,37 +202,82 @@ function fmt(v){return Number.isFinite(v)?(Math.abs(v)>=100?v.toFixed(0):v.toFix
 function pct(n,t){return t?((100*n/t).toFixed(0)+'%'):'— %';}
 function toNum(x){const s=String(x||'').trim();if(!s)return NaN;let t=s.replace(/\s/g,'');if(/,/.test(t)&&!/\.\d+$/.test(t))t=t.replace(/\./g,'').replace(',','.');const v=+t;return isNaN(v)?NaN:v;}
 function keyLike(rows,needle){if(!rows.length)return null;const keys=Object.keys(rows[0]);const U=s=>String(s).toUpperCase();for(const k of keys){if(U(k).includes(U(needle)))return k;}return null;}
-function download(filename, text) {
-  const blob = new Blob([text], {type:'text/csv;charset=utf-8;'});
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  document.body.appendChild(link); link.click(); link.remove();
-}
+function download(filename, text) { const blob = new Blob([text], {type:'text/csv;charset=utf-8;'}); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = filename; document.body.appendChild(link); link.click(); link.remove(); }
 
 /* ===== Estado ===== */
 let cached=null, lastRows=null, lastCuts=null;
 const Q_LABELS={Q1:'Q1 · Excelente',Q2:'Q2 · Productivo pero riesgoso',Q3:'Q3 · Seguro pero baja productividad',Q4:'Q4 · Bajo rendimiento y riesgoso'};
-let monthsOrdered=[];           // lista ordenada
-let monthsSelected=new Set();   // selección chips
+let monthsOrdered=[]; let monthsSelected=new Set();
 
-/* ===== Archivo y meses (chips) ===== */
-fileInput.addEventListener('change', async e=>{
-  const f=e.target.files[0]; if(!f) return;
-  status.textContent='Leyendo archivo…';
+/* ===== Google Sheets (MISMA hoja con 2 pestañas) — GViz JSONP ===== */
+const SHEET_ID = "1daGFLDuEh80eDbDyBEVE1eQjVUW88i1vnYfSNmw4WmA";
+const SHEET_PROD = "Base_Producciones";
+const SHEET_PREC = "Base_Precursores";
+
+// Carga una pestaña por NOMBRE usando JSONP (sin CORS)
+function loadSheetGViz(sheetName){
+  return new Promise((resolve, reject)=>{
+    const cbName = "GVIZ_CB_" + Math.random().toString(36).slice(2);
+    window[cbName] = (resp) => {
+      try{
+        const t = resp.table;
+        const headers = t.cols.map(c => c.label || c.id);
+        const rows = t.rows.map(r => {
+          const o = {};
+          r.c.forEach((cell,i)=>{ o[headers[i]] = cell ? (cell.v ?? "") : ""; });
+          return o;
+        });
+        resolve(rows);
+      }catch(e){ reject(e); }
+      delete window[cbName]; script.remove();
+    };
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tq=${encodeURIComponent("select *")}&sheet=${encodeURIComponent(sheetName)}&headers=1&tqx=${encodeURIComponent("responseHandler:"+cbName+";out:json")}`;
+    const script = document.createElement("script");
+    script.src = url;
+    script.onerror = ()=>{ delete window[cbName]; reject(new Error("No se pudo cargar "+sheetName)); };
+    document.body.appendChild(script);
+  });
+}
+
+async function loadFromSheets(){
   try{
-    const data=await f.arrayBuffer();
-    const wb=XLSX.read(data,{type:'array'});
-    const dfP=XLSX.utils.sheet_to_json(wb.Sheets['Base_Producciones']||{}, {defval:''});
-    const dfS=XLSX.utils.sheet_to_json(wb.Sheets['Base_Precursores']||{}, {defval:''});
-    if(!dfP.length||!dfS.length){ status.textContent='No encontré las hojas requeridas.'; return; }
-    cached={dfP,dfS};
-    const mP=keyLike(dfP,'MES'), mS=keyLike(dfS,'MES');
-    const months=[...(mP?dfP.map(r=>r[mP]):[]), ...(mS?dfS.map(r=>r[mS]):[])].filter(Boolean);
-    monthsOrdered=sortMonths(Array.from(new Set(months)));
+    status.textContent = "Cargando datos desde Google Sheets (GViz)…";
+    const [dfP, dfS] = await Promise.all([
+      loadSheetGViz(SHEET_PROD),   // Base_Producciones
+      loadSheetGViz(SHEET_PREC)    // Base_Precursores
+    ]);
+    if(!dfP.length || !dfS.length) throw new Error("Hojas vacías o sin permisos.");
+
+    cached = { dfP, dfS };
+    const mP = keyLike(dfP,'MES'), mS = keyLike(dfS,'MES');
+    const months = [...(mP?dfP.map(r=>r[mP]):[]), ...(mS?dfS.map(r=>r[mS]):[])].filter(Boolean);
+    monthsOrdered = sortMonths(Array.from(new Set(months)));
     renderMonthChips();
-    status.textContent='Archivo cargado. Selecciona meses (opcional) y presiona “Generar”.';
-  }catch(err){ console.error(err); status.textContent='No pude leer el archivo.'; }
+
+    status.textContent = "Datos cargados. Presiona Generar o aplica filtros.";
+  }catch(err){
+    console.error(err);
+    alert("No pude leer Google Sheets. Verifica que el archivo esté 'Cualquiera con el enlace - Lector' y que las hojas se llamen exactamente 'Base_Producciones' y 'Base_Precursores'.\n\nDetalle: "+err.message);
+    status.textContent = "Error al cargar desde Sheets.";
+  }
+}
+
+/* ===== Eventos UI ===== */
+document.getElementById('gsBtn').addEventListener('click', loadFromSheets);
+document.getElementById('runBtn').addEventListener('click', ()=>generate());
+document.getElementById('csvBtn').addEventListener('click', ()=>exportCSV());
+document.getElementById('csvBtn2').addEventListener('click', ()=>exportCSV());
+resetBtn.addEventListener('click', ()=>{
+  monthsSelected.clear(); document.querySelectorAll('#chipsMes .chip').forEach(c=>c.classList.remove('active'));
+  wGeo.value=1; wVel.value=1; wSom.value=1; wTel.value=1;
+  prodMode.value='median'; secMode.value='median'; prodCut.value=''; secCut.value=''; prodCut.style.display='none'; secCut.style.display='none';
+  if(cached) generate();
+});
+themeBtn.addEventListener('click', ()=>{
+  const root=document.documentElement;
+  const next=root.getAttribute('data-theme')==='dark'?'light':'dark';
+  root.setAttribute('data-theme', next);
+  if(lastRows&&lastCuts) plotChart(lastRows,lastCuts);
 });
 function renderMonthChips(){
   const wrap=$('#chipsMes'); wrap.innerHTML='';
@@ -239,45 +288,17 @@ function renderMonthChips(){
     wrap.appendChild(span);
   });
 }
-selAll.onclick=()=>{
-  monthsSelected=new Set(monthsOrdered);
-  document.querySelectorAll('#chipsMes .chip').forEach(c=>c.classList.add('active'));
-};
-clearSel.onclick=()=>{
-  monthsSelected.clear();
-  document.querySelectorAll('#chipsMes .chip').forEach(c=>c.classList.remove('active'));
-};
+selAll.onclick=()=>{ monthsSelected=new Set(monthsOrdered); document.querySelectorAll('#chipsMes .chip').forEach(c=>c.classList.add('active')); };
+clearSel.onclick=()=>{ monthsSelected.clear(); document.querySelectorAll('#chipsMes .chip').forEach(c=>c.classList.remove('active')); };
 prodMode.onchange=e=>prodCut.style.display=e.target.value==='custom'?'block':'none';
 secMode.onchange=e=>secCut.style.display=e.target.value==='custom'?'block':'none';
 
-/* ===== Botones superiores ===== */
-document.getElementById('runBtn').addEventListener('click', ()=>generate());
-document.getElementById('csvBtn').addEventListener('click', ()=>exportCSV());
-document.getElementById('csvBtn2').addEventListener('click', ()=>exportCSV());
-resetBtn.addEventListener('click', ()=>{
-  // Meses
-  monthsSelected.clear(); document.querySelectorAll('#chipsMes .chip').forEach(c=>c.classList.remove('active'));
-  // Pesos
-  wGeo.value=1; wVel.value=1; wSom.value=1; wTel.value=1;
-  // Umbrales
-  prodMode.value='median'; secMode.value='median';
-  prodCut.value=''; secCut.value=''; prodCut.style.display='none'; secCut.style.display='none';
-  // Redibujar si hay datos
-  if(cached) generate();
-});
-themeBtn.addEventListener('click', ()=>{
-  const root=document.documentElement;
-  const next=root.getAttribute('data-theme')==='dark'?'light':'dark';
-  root.setAttribute('data-theme', next);
-  if(lastRows&&lastCuts) plotChart(lastRows,lastCuts);
-});
-
-/* ===== Generar ===== */
-function generate(){
-  if(!cached){ alert('Primero carga un archivo.'); return; }
+/* ===== Core pipeline ===== */
+async function generate(){
+  if(!cached){ alert('Primero usa “Cargar desde Google Sheets”.'); return; }
   let {dfP,dfS}=cached;
 
-  // Filtro por mes usando chips seleccionados
+  // Filtro por mes
   const selected=[...monthsSelected];
   const mP=keyLike(dfP,'MES'), mS=keyLike(dfS,'MES');
   if(selected.length){ if(mP) dfP=dfP.filter(r=>selected.includes(String(r[mP]))); if(mS) dfS=dfS.filter(r=>selected.includes(String(r[mS]))); }
@@ -306,7 +327,7 @@ function generate(){
   });
   const prod={}; Object.entries(agg).forEach(([s,v])=>{ if(v.d>0) prod[s]=v.g/v.d; });
 
-  // Seguridad (TIPOS + # EVENTOS)
+  // Seguridad (4 categorías via TIPOS y # EVENTOS)
   const cats=['Geocercas','Velocidad en Ruta','Somnolencia','Teléfono'];
   const sumEv={};
   dfS.forEach(r=>{
@@ -345,10 +366,9 @@ function generate(){
   status.textContent=`SIGLAs: ${rows.length}. Cortes → Prod: ${fmt(cutP)} | Seg: ${fmt(cutS)}.`;
 }
 
-/* ===== Exportar CSV (respeta orden actual) ===== */
+/* ===== Export CSV ===== */
 function exportCSV(){
   if(!lastRows || !lastRows.length){ alert('No hay datos para exportar.'); return; }
-  // Tomamos filas visibles según orden pintado
   const rows=[...document.querySelectorAll('#resTable tbody tr')].map(tr=>{
     const tds=tr.querySelectorAll('td');
     return {sigla:tds[0].innerText, prod:tds[1].innerText, seg:tds[2].innerText, cuadrante:tds[3].innerText};
@@ -358,7 +378,7 @@ function exportCSV(){
   download('matriz_prod_seg.csv', header+body);
 }
 
-/* ===== Gráfico (4 traces, hover preciso) ===== */
+/* ===== Gráfico ===== */
 function plotChart(rows,{cutP,cutS}) {
   const color = { Q1:getComputedStyle(document.documentElement).getPropertyValue('--good').trim(),
                   Q2:getComputedStyle(document.documentElement).getPropertyValue('--warn').trim(),
